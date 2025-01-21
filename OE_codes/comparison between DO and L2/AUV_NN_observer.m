@@ -1,0 +1,221 @@
+
+function [dy,tao_u,tao_r,e_u,e_r,dist1,dist2,dist3,x_d,y_d,Feu,Fer,x_e,y_e,psi_e,est_d1,est_d2,est_d3] = AUV_NN_observer(t,y,m11,m22,m33,...
+    Xu,Yv,Nr,Xuu,Yvv,Nrr,k01,k02,k1,k2,k3,k4,k5,k6,delta,const_t,n1,n2,n3,L0)% modified on 03-02-2017
+dy = zeros(31,1);
+
+% y(1) ---- x coordiante in the earth-fixed frame
+% y(2) ---- y coordiante in the earth-fixed frame
+% y(3) ---- heading in the earth-fixed frame
+% y(4) ---- surge speed in the body-fixed frame
+% y(5) ---- sway speed in the body-fixed frame
+% y(6) ---- yaw rate in the body-fixed frame
+
+% y(7)----- lowpass filter output
+
+% y(8) ---- first of disturbance observer state variables
+% y(9) ---- second of disturbance observer state variables
+% y(10) ---- third of disturbance observer state variables
+
+%y(11)~y(18)--- NN updated weights
+
+M_tans1 = [cos(y(3)) -sin(y(3)) 0
+                sin(y(3))  cos(y(3)) 0
+                0            0            1];
+M_temp1 = M_tans1*[y(4);y(5);y(6)];
+
+dy(1) = M_temp1(1);
+dy(2) = M_temp1(2);
+dy(3) = M_temp1(3);
+
+u = y(4);v = y(5); r = y(6);
+
+beta_drift = atan(v/(u));
+ 
+% x_d = cos(t);y_d = sin(t);
+% diff_x_d = -sin(t);diff_y_d = cos(t);
+
+x_d = 0.5*t;y_d = 6 + 0.2*sin(0.2*t);
+diff_x_d = 0.5;diff_y_d = 0.04*cos(0.2*t);
+% 
+
+d11 = Xu + Xuu*abs(u);
+d22 = Yv + Yvv*abs(v);
+d33 = Nr + Nrr*abs(r);
+f_u = (m22*v*r - d11*u)/m11;
+f_v = (-m11*u*r - d22*v)/m22;
+f_r = ((m11-m22)*u*v - d33*r)/m33;
+
+
+psi_F = atan(diff_y_d/diff_x_d);
+
+Q = [cos(psi_F) sin(psi_F)
+     -sin(psi_F) cos(psi_F)];
+temp_xeye = Q*[(y(1)-x_d) (y(2)-y_d)]';
+
+x_e = temp_xeye(1) ;
+y_e = temp_xeye(2);
+
+U_d = sqrt(diff_x_d^2 + diff_y_d^2);
+psi_d = psi_F - beta_drift + atan(-y_e/delta);
+
+psi_e = y(3) - psi_d;
+
+dy(7) = (psi_d - y(7))/const_t;
+d_psi_d = (psi_d - y(7))/const_t;
+
+u_d = (-k01*x_e + U_d)*cos(beta_drift)*sqrt(delta^2 + y_e^2)/delta;
+r_d = d_psi_d - k02*(y(3) - psi_d);
+
+e_u = u - u_d;
+e_r = r - r_d;
+
+nninput = [u v r x_e y_e e_u e_r 1]'; % input of neural network
+
+for i=1:length(nninput)
+    fi(i)=1/(1+exp(-nninput(i)));
+end
+
+% for i=1:length(nninput) % leaky Relu function, on 2023-05-15
+%     if nninput(i)>=0
+%         fi(i)= nninput(i);
+%     else
+%         fi(i)= 0.001*nninput(i);
+%     end
+% end
+
+% to describe the neural network weights
+Wu = zeros(length(nninput),1);
+Wr = zeros(length(nninput),1);
+error = [e_u e_r]';
+
+for j=1:length(nninput)
+    dy(7+j) = k3*fi(j)*e_u - k4*norm(error)*y(7+j);
+    Wu(j)=y(7+j);
+end
+for q=1:length(nninput)
+    dy(7+length(Wu)+q) = k5*fi(q)*e_r - k6*norm(error)*y(7+length(Wu)+q);
+    Wr(q)=y(7+length(Wu)+q);
+end
+
+% dist1 = n1*randn;
+% dist2 = n2*randn;
+% dist3 = n3*randn;
+
+% dist1 = 12 + sin(0.8*t + pi/8) - 0.6*sin(0.5*pi*t);
+% dist2 = n2*randn;
+% dist3 = 5 + sin(0.8*t + pi/6) - 0.5*sin(0.3*pi*t);
+
+% dist1 = 0.3*sin(0.2*t);
+% dist2 = 0.1*sin(0.2*t);
+% dist3 = 0.1*cos(0.3*t);
+
+if t<100
+    dist1 = 0.1*sin(0.3*t);
+    dist2 = 0.2*sin(0.3*t);
+    dist3 = 0.3*r*cos(0.3*t);
+else
+    dist1 = 0.05*sin(0.15*t);
+    dist2 = 0.35*sin(0.15*t);
+    dist3 = 0.5*r*cos(0.5*t);
+end
+
+G1 = [u;v;r];
+M_est_d = [y(24);y(25);y(26)] + L0*G1;
+est_d1 = M_est_d(1);
+est_d2 = M_est_d(2);
+est_d3 = M_est_d(3);
+
+
+
+tao_u = m11*(-Wu'*fi'- est_d1 - f_u - k1*e_u);
+tao_r = m33*(-Wr'*fi'- est_d3 - f_r - k2*e_r);
+
+Feu = Wu'*fi';
+Fer = Wr'*fi';
+
+
+
+
+
+
+B_tao_u  = 200;
+if tao_u>B_tao_u
+    tao_u = B_tao_u;
+elseif tao_u<-B_tao_u
+    tao_u = -B_tao_u;
+elseif tao_u>=-B_tao_u && tao_u<=B_tao_u
+    tao_u = B_tao_u*tanh(tao_u/B_tao_u);
+end
+
+% B_tao_u  = 200;
+% if tao_u>B_tao_u
+%     tao_u = B_tao_u;
+% elseif tao_u<-B_tao_u
+%     tao_u = -B_tao_u;
+% end
+
+
+B_tao_r  = 150;
+if tao_r>B_tao_r
+    tao_r = B_tao_r;
+elseif tao_r<-B_tao_r
+    tao_r = -B_tao_r;
+elseif tao_r>=-B_tao_r && tao_r<=B_tao_r
+    tao_r = B_tao_r*tanh(tao_r/B_tao_r);
+end
+
+% B_tao_r  = 150;
+% if tao_r>B_tao_r
+%     tao_r = B_tao_r;
+% elseif tao_r<-B_tao_r
+%     tao_r = -B_tao_r;
+% end
+
+G2 = [f_u+tao_u/m11;f_v;f_r+tao_r/m33];
+
+M_z = -L0*[y(24);y(25);y(26)] - L0*(L0*G1 + G2);
+
+dy(24) = M_z(1);
+dy(25) = M_z(2);
+dy(26) = M_z(3);
+
+%============  modified on 03-02-2017 ======
+
+%============  modified on 03-02-2017 ======
+
+dy(4) = f_u + tao_u/m11 + dist1;
+dy(5) = f_v + dist2;
+dy(6) = f_r + tao_r/m33 + dist3;
+
+% dy(27) = t*abs(x_e);% ITAE
+% dy(28) = t*abs(y_e);
+% dy(29) = t*abs(psi_e);
+
+dy(27) = abs(x_e);% IAE
+dy(28) = abs(y_e);
+dy(29) = abs(psi_e);
+
+dy(30) = abs(tao_u);% MAI
+dy(31) = abs(tao_r);
+
+
+
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
